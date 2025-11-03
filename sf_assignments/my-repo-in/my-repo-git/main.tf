@@ -1,0 +1,147 @@
+provider "aws" {
+  region = "us-east-1"
+}
+
+# Create DynamoDB Table
+resource "aws_dynamodb_table" "my-table" {
+  name         = "my-table"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "id"
+
+  attribute {
+    name = "id"
+    type = "S"
+  }
+}
+
+# Create S3 Bucket
+resource "aws_s3_bucket" "my-bucket" {
+  bucket = "my-bucket-vnd"
+}
+
+# Create IAM Role for Lambda
+resource "aws_iam_role" "lambda_role" {
+  name = "lambda-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Action = "sts:AssumeRole",
+        Effect = "Allow",
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+# Attach Policy to Lambda Role
+resource "aws_iam_role_policy_attachment" "lambda_policy_attachment" {
+  role       = aws_iam_role.lambda_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+data "archive_file" "lambda" {
+  type        = "zip"
+  source_file = "lambda_function.py"
+  output_path = "lambda_function.zip"
+}
+
+
+# Create Lambda Function
+resource "aws_lambda_function" "retrieve_data" {
+  filename         = "lambda_function.zip"
+  function_name    = "main_lambda"
+  role             = aws_iam_role.lambda_role.arn
+  handler          = "lambda_function.lambda_handler"
+  runtime          = "python3.11"
+  source_code_hash = filebase64sha256("lambda_function.zip")
+
+  environment {
+    variables = {
+      TABLE_NAME = aws_dynamodb_table.my-table.name
+      BUCKET_NAME = aws_s3_bucket.my-bucket.bucket
+    }
+  }
+}
+
+# Create API Gateway
+resource "aws_api_gateway_rest_api" "example_api" {
+  name = "example_api"
+}
+
+# Define API Gateway resource for items
+resource "aws_api_gateway_resource" "example_resource" {
+  rest_api_id = aws_api_gateway_rest_api.example_api.id
+  parent_id   = aws_api_gateway_rest_api.example_api.root_resource_id
+  path_part   = "items"
+}
+
+# Define GET method for items resource
+resource "aws_api_gateway_method" "get_method" {
+  rest_api_id   = aws_api_gateway_rest_api.example_api.id
+  resource_id   = aws_api_gateway_resource.example_resource.id
+  http_method   = "GET"
+  authorization = "NONE"  # Ensure appropriate authorization settings
+}
+
+resource "aws_api_gateway_method" "post_method" {
+  rest_api_id   = aws_api_gateway_rest_api.example_api.id
+  resource_id   = aws_api_gateway_resource.example_resource.id
+  http_method   = "POST"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_method" "delete_method" {
+  rest_api_id   = aws_api_gateway_rest_api.example_api.id
+  resource_id   = aws_api_gateway_resource.example_resource.id
+  http_method   = "DELETE"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_integration" "get_integration" {
+  rest_api_id             = aws_api_gateway_rest_api.example_api.id
+  resource_id             = aws_api_gateway_resource.example_resource.id
+  http_method             = aws_api_gateway_method.get_method.http_method
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.retrieve_data.invoke_arn
+}
+
+resource "aws_api_gateway_integration" "post_integration" {
+  rest_api_id             = aws_api_gateway_rest_api.example_api.id
+  resource_id             = aws_api_gateway_resource.example_resource.id
+  http_method             = aws_api_gateway_method.post_method.http_method
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.retrieve_data.invoke_arn
+}
+
+resource "aws_api_gateway_integration" "delete_integration" {
+  rest_api_id             = aws_api_gateway_rest_api.example_api.id
+  resource_id             = aws_api_gateway_resource.example_resource.id
+  http_method             = aws_api_gateway_method.delete_method.http_method
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.retrieve_data.invoke_arn
+}
+
+# Define integration between API Gateway and Lambda (Lambda integration)
+
+
+
+
+# Define Lambda permission for API Gateway to invoke Lambda
+resource "aws_lambda_permission" "api_gateway_permission" {
+  statement_id  = "AllowAPIGatewayInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.retrieve_data.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_api_gateway_rest_api.example_api.execution_arn}/*/*"
+}
+
+# Output API Gateway URL
+output "api_gateway_url" {
+  value = "${aws_api_gateway_rest_api.example_api.id}.execute-api.${var.aws_region}.amazonaws.com/${aws_api_gateway_resource.example_resource.path_part}"
+}
